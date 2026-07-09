@@ -1,0 +1,23 @@
+# MATLAB temporary files
+*.asv
+*.m~
+*.fig
+
+# MATLAB data files
+*.mat
+
+# Output images and generated results
+data/output/*
+results/figures/*
+results/tables/*
+
+# Keep empty folders
+!data/output/.gitkeep
+!results/figures/.gitkeep
+!results/tables/.gitkeep
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
