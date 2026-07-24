@@ -399,6 +399,143 @@ def main():
 
     print()
 
+    # ---- TEST 5: Visual Watermark Verification ----
+    print("=" * 50)
+    print("  TEST 5: Visual Watermark Mapping Verification")
+    print("=" * 50)
+
+    visual_dir = os.path.join(OUTPUT_DIR, "visual_verification")
+    os.makedirs(visual_dir, exist_ok=True)
+
+    # 5a. Amplified difference image (LSB)
+    if os.path.isfile(lsb_out):
+        lsb_img = np.array(Image.open(lsb_out))
+        diff = np.abs(original.astype(np.int16) - lsb_img.astype(np.int16))
+        # Amplify by 50x so changes are visible
+        diff_amplified = np.clip(diff * 50, 0, 255).astype(np.uint8)
+        diff_path = os.path.join(visual_dir, "lsb_difference_amplified.png")
+        Image.fromarray(diff_amplified).save(diff_path)
+        report(os.path.isfile(diff_path), f"LSB amplified difference image saved: {diff_path}")
+
+        # Verify the difference is only in the blue channel (channel index 2)
+        red_diff = np.sum(diff[:, :, 0])
+        green_diff = np.sum(diff[:, :, 1])
+        blue_diff = np.sum(diff[:, :, 2])
+        report(
+            red_diff == 0 and green_diff == 0 and blue_diff > 0,
+            f"LSB changes only in blue channel (R={red_diff}, G={green_diff}, B={blue_diff})",
+        )
+
+    # 5b. Amplified difference image (DCT)
+    if os.path.isfile(dct_out):
+        dct_img = np.array(Image.open(dct_out))
+        diff = np.abs(original.astype(np.int16) - dct_img.astype(np.int16))
+        diff_amplified = np.clip(diff * 50, 0, 255).astype(np.uint8)
+        diff_path = os.path.join(visual_dir, "dct_difference_amplified.png")
+        Image.fromarray(diff_amplified).save(diff_path)
+        report(os.path.isfile(diff_path), f"DCT amplified difference image saved: {diff_path}")
+
+    # 5c. Extract and display watermark from LSB
+    if os.path.isfile(lsb_out):
+        lsb_img = np.array(Image.open(lsb_out))
+        wm_binary, wm_bits = load_watermark_bits(WATERMARK_IMAGE)
+        wm_h, wm_w = wm_binary.shape
+        blue = lsb_img[:, :, 2].flatten()
+        extracted_bits = np.array([b & 1 for b in blue[: len(wm_bits)]], dtype=np.uint8)
+        extracted_wm = extracted_bits.reshape(wm_h, wm_w)
+
+        # Save original watermark for side-by-side comparison
+        orig_wm_path = os.path.join(visual_dir, "watermark_original.png")
+        Image.fromarray((wm_binary * 255).astype(np.uint8)).save(orig_wm_path)
+
+        # Save extracted watermark
+        extracted_wm_path = os.path.join(visual_dir, "watermark_extracted_lsb.png")
+        Image.fromarray((extracted_wm * 255).astype(np.uint8)).save(extracted_wm_path)
+        report(
+            os.path.isfile(extracted_wm_path),
+            f"Extracted LSB watermark image saved: {extracted_wm_path}",
+        )
+
+        # Check extracted watermark matches original visually (pixel-perfect)
+        match = np.array_equal(extracted_wm, wm_binary)
+        report(match, "Extracted LSB watermark is pixel-perfect match to original")
+
+    # 5d. DCT block usage heatmap
+    if os.path.isfile(dct_meta):
+        with open(dct_meta) as f:
+            dct_metadata = json.load(f)
+        orig_h = dct_metadata["originalHeight"]
+        orig_w = dct_metadata["originalWidth"]
+        padded_h = dct_metadata["paddedHeight"]
+        padded_w = dct_metadata["paddedWidth"]
+        block_size = dct_metadata["blockSize"]
+        num_blocks_w = padded_w // block_size
+
+        wm_binary, wm_bits = load_watermark_bits(WATERMARK_IMAGE)
+        num_bits = len(wm_bits)
+        max_bits = (padded_h // block_size) * num_blocks_w
+        selected_indices = np.round(np.linspace(0, max_bits - 1, num_bits)).astype(int)
+
+        # Create heatmap showing which blocks are used
+        heatmap = np.zeros((orig_h, orig_w), dtype=np.uint8)
+        for idx in selected_indices:
+            block_row = idx // num_blocks_w
+            block_col = idx % num_blocks_w
+            r_start = block_row * block_size
+            c_start = block_col * block_size
+            r_end = min(r_start + block_size, orig_h)
+            c_end = min(c_start + block_size, orig_w)
+            heatmap[r_start:r_end, c_start:c_end] = 255
+
+        heatmap_path = os.path.join(visual_dir, "dct_block_heatmap.png")
+        Image.fromarray(heatmap).save(heatmap_path)
+        report(
+            os.path.isfile(heatmap_path),
+            f"DCT block usage heatmap saved: {heatmap_path}",
+        )
+
+        # Verify blocks are spread across the image (not clustered)
+        # Check that used blocks span at least 80% of image height and width
+        rows_used = set()
+        cols_used = set()
+        for idx in selected_indices:
+            block_row = idx // num_blocks_w
+            block_col = idx % num_blocks_w
+            rows_used.add(block_row)
+            cols_used.add(block_col)
+
+        num_blocks_h = padded_h // block_size
+        row_coverage = len(rows_used) / num_blocks_h
+        col_coverage = len(cols_used) / num_blocks_w
+        report(
+            row_coverage >= 0.8 and col_coverage >= 0.8,
+            f"DCT blocks spread evenly (row coverage: {row_coverage:.0%}, col coverage: {col_coverage:.0%})",
+        )
+
+    # 5e. Side-by-side comparison (original vs watermarked, saved as single image)
+    if os.path.isfile(lsb_out):
+        lsb_img = np.array(Image.open(lsb_out))
+        # Create side-by-side image
+        h, w = original.shape[:2]
+        separator = np.ones((h, 10, 3), dtype=np.uint8) * 128
+        side_by_side = np.concatenate([original, separator, lsb_img], axis=1)
+        sbs_path = os.path.join(visual_dir, "lsb_side_by_side.png")
+        Image.fromarray(side_by_side).save(sbs_path)
+        report(os.path.isfile(sbs_path), f"LSB side-by-side comparison saved: {sbs_path}")
+
+    if os.path.isfile(dct_out):
+        dct_img = np.array(Image.open(dct_out))
+        h, w = original.shape[:2]
+        separator = np.ones((h, 10, 3), dtype=np.uint8) * 128
+        side_by_side = np.concatenate([original, separator, dct_img], axis=1)
+        sbs_path = os.path.join(visual_dir, "dct_side_by_side.png")
+        Image.fromarray(side_by_side).save(sbs_path)
+        report(os.path.isfile(sbs_path), f"DCT side-by-side comparison saved: {sbs_path}")
+
+    print()
+    print(f"  Visual verification images saved to: {visual_dir}")
+    print()
+
     # ---- Summary ----
     print("=" * 50)
     print("  TEST SUMMARY")
