@@ -363,6 +363,209 @@ end
 fprintf('\n');
 
 %% ============================================================
+%  TEST 5: Visual Watermark Mapping Verification
+%  ============================================================
+fprintf('==============================================\n');
+fprintf('  TEST 5: Visual Watermark Mapping Verification\n');
+fprintf('==============================================\n');
+
+visualFolder = fullfile(testOutputFolder, 'visual_verification');
+if ~exist(visualFolder, 'dir')
+    mkdir(visualFolder);
+end
+
+% 5a. Amplified difference image (LSB)
+if exist(lsbOutputPath, 'file')
+    lsbImg = imread(lsbOutputPath);
+    diff = abs(double(originalImg) - double(lsbImg));
+    diffAmplified = uint8(min(diff * 50, 255));
+    diffPath = fullfile(visualFolder, 'lsb_difference_amplified.png');
+    imwrite(diffAmplified, diffPath);
+    if exist(diffPath, 'file')
+        fprintf('  [PASS] LSB amplified difference image saved: %s\n', diffPath);
+        numPassed = numPassed + 1;
+    else
+        fprintf('  [FAIL] LSB amplified difference image NOT saved\n');
+        numFailed = numFailed + 1;
+    end
+
+    % Verify changes only in blue channel
+    redDiff = sum(sum(diff(:,:,1)));
+    greenDiff = sum(sum(diff(:,:,2)));
+    blueDiff = sum(sum(diff(:,:,3)));
+    if redDiff == 0 && greenDiff == 0 && blueDiff > 0
+        fprintf('  [PASS] LSB changes only in blue channel (R=%d, G=%d, B=%d)\n', redDiff, greenDiff, blueDiff);
+        numPassed = numPassed + 1;
+    else
+        fprintf('  [FAIL] LSB changes not isolated to blue channel (R=%d, G=%d, B=%d)\n', redDiff, greenDiff, blueDiff);
+        numFailed = numFailed + 1;
+    end
+end
+
+% 5b. Amplified difference image (DCT)
+if exist(dctOutputPath, 'file')
+    dctImg = imread(dctOutputPath);
+    diff = abs(double(originalImg) - double(dctImg));
+    diffAmplified = uint8(min(diff * 50, 255));
+    diffPath = fullfile(visualFolder, 'dct_difference_amplified.png');
+    imwrite(diffAmplified, diffPath);
+    if exist(diffPath, 'file')
+        fprintf('  [PASS] DCT amplified difference image saved: %s\n', diffPath);
+        numPassed = numPassed + 1;
+    else
+        fprintf('  [FAIL] DCT amplified difference image NOT saved\n');
+        numFailed = numFailed + 1;
+    end
+end
+
+% 5c. Extract and display watermark from LSB
+if exist(lsbOutputPath, 'file')
+    lsbImg = imread(lsbOutputPath);
+    watermarkOrig = imread(watermarkPath);
+    if size(watermarkOrig, 3) == 3
+        wmDouble = double(watermarkOrig);
+        wmGray = 0.299 * wmDouble(:,:,1) + 0.587 * wmDouble(:,:,2) + 0.114 * wmDouble(:,:,3);
+    else
+        wmGray = double(watermarkOrig);
+    end
+    wmBinary = wmGray > 128;
+    [wmH, wmW] = size(wmBinary);
+    wmBits = wmBinary(:);
+    numWmBits = length(wmBits);
+
+    blueChannel = lsbImg(:,:,3);
+    extractedBits = zeros(numWmBits, 1);
+    for px = 1:numWmBits
+        extractedBits(px) = bitand(uint8(blueChannel(px)), uint8(1));
+    end
+    extractedWm = reshape(extractedBits, [wmH, wmW]);
+
+    % Save original watermark (binarized)
+    origWmPath = fullfile(visualFolder, 'watermark_original.png');
+    imwrite(uint8(wmBinary * 255), origWmPath);
+
+    % Save extracted watermark
+    extractedWmPath = fullfile(visualFolder, 'watermark_extracted_lsb.png');
+    imwrite(uint8(extractedWm * 255), extractedWmPath);
+    if exist(extractedWmPath, 'file')
+        fprintf('  [PASS] Extracted LSB watermark image saved: %s\n', extractedWmPath);
+        numPassed = numPassed + 1;
+    else
+        fprintf('  [FAIL] Extracted LSB watermark image NOT saved\n');
+        numFailed = numFailed + 1;
+    end
+
+    % Check pixel-perfect match
+    if isequal(extractedWm, wmBinary)
+        fprintf('  [PASS] Extracted LSB watermark is pixel-perfect match to original\n');
+        numPassed = numPassed + 1;
+    else
+        fprintf('  [FAIL] Extracted LSB watermark does NOT match original\n');
+        numFailed = numFailed + 1;
+    end
+end
+
+% 5d. DCT block usage heatmap
+if exist(dctMetadataPath, 'file')
+    fid = fopen(dctMetadataPath, 'r');
+    metaText = fread(fid, '*char')';
+    fclose(fid);
+    dctMeta = jsondecode(metaText);
+
+    origH = dctMeta.originalHeight;
+    origW = dctMeta.originalWidth;
+    paddedH = dctMeta.paddedHeight;
+    paddedW = dctMeta.paddedWidth;
+    blkSize = dctMeta.blockSize;
+    numBlocksW = paddedW / blkSize;
+    numBlocksH = paddedH / blkSize;
+
+    watermarkOrig = imread(watermarkPath);
+    if size(watermarkOrig, 3) == 3
+        wmDouble = double(watermarkOrig);
+        wmGray = 0.299 * wmDouble(:,:,1) + 0.587 * wmDouble(:,:,2) + 0.114 * wmDouble(:,:,3);
+    else
+        wmGray = double(watermarkOrig);
+    end
+    wmBinary = wmGray > 128;
+    numBitsDCT = numel(wmBinary);
+    maxBitsDCT = numBlocksH * numBlocksW;
+    selectedIndices = round(linspace(1, maxBitsDCT, numBitsDCT));
+
+    % Create heatmap
+    heatmap = zeros(origH, origW, 'uint8');
+    for i = 1:length(selectedIndices)
+        blockIndex = selectedIndices(i);
+        blockRow = floor((blockIndex - 1) / numBlocksW) + 1;
+        blockCol = mod(blockIndex - 1, numBlocksW) + 1;
+        rowStart = (blockRow - 1) * blkSize + 1;
+        colStart = (blockCol - 1) * blkSize + 1;
+        rowEnd = min(rowStart + blkSize - 1, origH);
+        colEnd = min(colStart + blkSize - 1, origW);
+        heatmap(rowStart:rowEnd, colStart:colEnd) = 255;
+    end
+
+    heatmapPath = fullfile(visualFolder, 'dct_block_heatmap.png');
+    imwrite(heatmap, heatmapPath);
+    if exist(heatmapPath, 'file')
+        fprintf('  [PASS] DCT block usage heatmap saved: %s\n', heatmapPath);
+        numPassed = numPassed + 1;
+    else
+        fprintf('  [FAIL] DCT block usage heatmap NOT saved\n');
+        numFailed = numFailed + 1;
+    end
+
+    % Verify blocks are spread evenly across the image
+    rowsUsed = unique(floor((selectedIndices - 1) / numBlocksW) + 1);
+    colsUsed = unique(mod(selectedIndices - 1, numBlocksW) + 1);
+    rowCoverage = length(rowsUsed) / numBlocksH;
+    colCoverage = length(colsUsed) / numBlocksW;
+    if rowCoverage >= 0.8 && colCoverage >= 0.8
+        fprintf('  [PASS] DCT blocks spread evenly (row coverage: %.0f%%, col coverage: %.0f%%)\n', rowCoverage*100, colCoverage*100);
+        numPassed = numPassed + 1;
+    else
+        fprintf('  [FAIL] DCT blocks not spread evenly (row coverage: %.0f%%, col coverage: %.0f%%)\n', rowCoverage*100, colCoverage*100);
+        numFailed = numFailed + 1;
+    end
+end
+
+% 5e. Side-by-side comparison images
+if exist(lsbOutputPath, 'file')
+    lsbImg = imread(lsbOutputPath);
+    [h, ~, ~] = size(originalImg);
+    separator = uint8(128 * ones(h, 10, 3));
+    sideBySide = cat(2, originalImg, separator, lsbImg);
+    sbsPath = fullfile(visualFolder, 'lsb_side_by_side.png');
+    imwrite(sideBySide, sbsPath);
+    if exist(sbsPath, 'file')
+        fprintf('  [PASS] LSB side-by-side comparison saved: %s\n', sbsPath);
+        numPassed = numPassed + 1;
+    else
+        fprintf('  [FAIL] LSB side-by-side comparison NOT saved\n');
+        numFailed = numFailed + 1;
+    end
+end
+
+if exist(dctOutputPath, 'file')
+    dctImg = imread(dctOutputPath);
+    [h, ~, ~] = size(originalImg);
+    separator = uint8(128 * ones(h, 10, 3));
+    sideBySide = cat(2, originalImg, separator, dctImg);
+    sbsPath = fullfile(visualFolder, 'dct_side_by_side.png');
+    imwrite(sideBySide, sbsPath);
+    if exist(sbsPath, 'file')
+        fprintf('  [PASS] DCT side-by-side comparison saved: %s\n', sbsPath);
+        numPassed = numPassed + 1;
+    else
+        fprintf('  [FAIL] DCT side-by-side comparison NOT saved\n');
+        numFailed = numFailed + 1;
+    end
+end
+
+fprintf('\n  Visual verification images saved to: %s\n', visualFolder);
+fprintf('\n');
+
+%% ============================================================
 %  Summary
 %  ============================================================
 fprintf('==============================================\n');
