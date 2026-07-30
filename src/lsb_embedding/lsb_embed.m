@@ -35,7 +35,7 @@ if size(img, 3) ~= 3
     error('Input image must be an RGB image.');
 end
 
-%get the image dimensions
+%get the image and watermark dimensions
 [imgH, imgW, ~] = size(img);
 
 %Read the watermark image
@@ -65,9 +65,21 @@ watermarkBits = watermarkBinary(:);
 %total number of watermark bits to embed
 numWatermarkBits = length(watermarkBits);
 
+%Metadata bits to embed
+u16ImgH = dec2bin(uint16(wmH), 16);
+u16ImgW = dec2bin(uint16(wmW), 16);
+u32Length = dec2bin(uint32(numWatermarkBits), 32);
+imgWArray = logical(u16ImgW(:)' - '0');
+imgHArray = logical(u16ImgH(:)' - '0');
+imgLengthArray = logical(u32Length(:)' - '0');
+
+%Pack metadata bits to start of watermark bits array
+% Pack metadata bits to start of watermark bits array
+watermarkBits = [imgWArray'; imgHArray'; imgLengthArray'; watermarkBits];
+
 %calculate the maximum number of bits we can embed
 %using the blue channel with the specified number of LSBs
-maxCapacity = imgH * imgW * numBitsUsed;
+maxCapacity = (imgH * imgW * numBitsUsed) + 64;
 
 %check whether the watermark fits in the image
 if numWatermarkBits > maxCapacity
@@ -105,7 +117,7 @@ for pixelIndex = 1:(imgH * imgW)
     %collect up to numBitsUsed bits from the watermark stream
     bitsToEmbed = 0;
     for b = 1:numBitsUsed
-        if bitIndex <= numWatermarkBits
+        if bitIndex <= length(watermarkBits)
             %place each watermark bit into the correct position
             %MSB of embedded bits goes into the highest LSB position
             bitsToEmbed = bitsToEmbed + watermarkBits(bitIndex) * 2^(numBitsUsed - b);

@@ -32,6 +32,7 @@ end
 %The image will be divided into 8x8 blocks, each block stores one watermark
 %bit
 blockSize = 8;
+metadataLength = 80;
 
 %Read the original image
 %reads the original image and stores in img
@@ -118,13 +119,25 @@ watermarkBinary = watermarkGray > 128;
 %This turns the 2D watermark image into a 1D list of bits
 watermarkBits = watermarkBinary(:);
 
-%This counts how many bits the watermark has
+%This counts how many bits the watermark has and dimensions
 numBits = length(watermarkBits);
+[wmH, wmW] = size(watermarkBinary);
+
+%Build 80 bit watermark header
+hBits = dec2bin(uint16(wmH), 16) - '0';
+wBits = dec2bin(uint16(wmW), 16) - '0';
+nBits = dec2bin(uint32(numBits), 32) - '0';
+padHBits = dec2bin(uint8(padH), 8) - '0';
+padWBits = dec2bin(uint8(padW), 8) - '0';
+
+metadataBits = logical([hBits(:); wBits(:); nBits(:); ...
+                        padHBits(:); padWBits(:)]);
 
 %check whether the watermark can fit inside the original image
 %watermark cannot be larger than the number of blocks
-if numBits > maxBits
-    error('Watermark is too large for this image.');
+if metadataLength + numBits > maxBits
+    error(['Watermark is too large. Need %d complete 8x8 blocks, ' ...
+           'but only %d are available.'], metadataLength + numBits, maxBits);
 end
 
 %Choose DCT coefficients
@@ -140,12 +153,16 @@ coeff2 = [5,4];
 D = create_dct_matrix(blockSize);
 
 % Select block positions spread evenly across the whole image
-selectedBlockIndices = round(linspace(1, maxBits, numBits));
+metadataBlockIndices = 1:metadataLength;
+watermarkBlockIndices = round(linspace(metadataLength + 1, maxBits, numBits));
 
-for bitIndex = 1:numBits
+payloadBits = [metadataBits; watermarkBits];
+payloadBlockIndices = [metadataBlockIndices, watermarkBlockIndices];
+
+for bitIndex = 1:length(payloadBits)
 
     % Convert selected 1D block index into block row and block column
-    blockIndex = selectedBlockIndices(bitIndex);
+    blockIndex = payloadBlockIndices(bitIndex);
 
     blockRow = floor((blockIndex - 1) / numBlocksW) + 1;
     blockCol = mod(blockIndex - 1, numBlocksW) + 1;
@@ -165,7 +182,7 @@ for bitIndex = 1:numBits
     dctBlock = D * block * D';
 
     % Get the current watermark bit
-    bit = watermarkBits(bitIndex);
+    bit = payloadBits(bitIndex);
 
     % Read the two selected DCT coefficients
     c1 = dctBlock(coeff1(1), coeff1(2));
@@ -249,7 +266,7 @@ metadata.strength = strength;
 metadata.blockSize = blockSize;
 metadata.coeff1 = coeff1;
 metadata.coeff2 = coeff2;
-metadata.selectedBlockIndices = selectedBlockIndices;
+metadata.selectedBlockIndices = payloadBlockIndices;
 metadata.channel = 'Manual Y channel from RGB to YCbCr conversion';
 
 %converts the matlab metadata structure into JSON text
