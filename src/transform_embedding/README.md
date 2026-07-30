@@ -300,3 +300,171 @@ Everyone should use the same:
 - `strength` value
 - `dct_embed.m`
 - `run_dct_embed.m`
+
+---
+
+## What Changed in the Updated DCT Embedding Method
+
+The original DCT embedding method stored only **one complete watermark copy** across the whole image. Each watermark bit appeared in only one selected `8 × 8` block. If cropping removed that block, the corresponding watermark bit was permanently lost.
+
+The updated method improves crop resistance by embedding **six complete watermark copies** in separate image regions.
+
+### 1. The image is divided into six regions
+
+The DCT block grid is divided into a `2 × 3` layout:
+
+```text
++------------+------------+------------+
+|   Copy 1   |   Copy 2   |   Copy 3   |
++------------+------------+------------+
+|   Copy 4   |   Copy 5   |   Copy 6   |
++------------+------------+------------+
+```
+
+The regional layout is defined by:
+
+```matlab
+regionRows = 2;
+regionCols = 3;
+numCopies = regionRows * regionCols;
+```
+
+Each region stores one complete and independent copy of the watermark payload.
+
+### 2. Every region stores the complete payload
+
+The payload for each region contains:
+
+```text
+80-bit metadata header
++
+complete binary watermark
+```
+
+For a `64 × 64` watermark:
+
+```text
+80 header bits + 4096 watermark bits = 4176 bits per copy
+```
+
+Because one selected DCT block stores one bit, every region must contain at least 4,176 usable `8 × 8` blocks.
+
+### 3. Block selection is now regional
+
+The original method selected one set of blocks across the complete image:
+
+```matlab
+watermarkBlockIndices = round( ...
+    linspace(metadataLength + 1, maxBits, numBits));
+```
+
+The updated method first collects all block indices inside each region. It then selects enough evenly distributed blocks inside that region for one complete payload:
+
+```matlab
+selectedPositions = round(linspace( ...
+    1, regionCapacity, payloadLength));
+
+selectedBlocks = regionBlockIndices(selectedPositions);
+```
+
+This process is repeated for all six regions.
+
+### 4. The embedding loop now embeds six copies
+
+The original version used one loop to embed one payload.
+
+The updated version uses:
+
+```matlab
+for copyIndex = 1:numCopies
+    for payloadIndex = 1:payloadLength
+        ...
+    end
+end
+```
+
+The outer loop selects the regional copy. The inner loop embeds every header and watermark bit in that region.
+
+The actual coefficient-order rule has not changed:
+
+```text
+Bit 1: dctBlock(4,5) > dctBlock(5,4)
+Bit 0: dctBlock(5,4) > dctBlock(4,5)
+```
+
+### 5. Additional metadata is saved
+
+The updated `dct_metadata.json` contains new fields describing the regional-copy layout:
+
+```text
+metadataLength
+payloadLength
+regionRows
+regionCols
+numCopies
+regionBounds
+copyOrdering
+blockSelection
+supportedCropRatio
+regionalBlockIndices
+```
+
+The most important new field is:
+
+```text
+regionalBlockIndices
+```
+
+It stores the exact block locations used by all six regional copies.
+
+The original field:
+
+```text
+selectedBlockIndices
+```
+
+is retained for compatibility, but it now contains the flattened block locations for all six copies.
+
+### 6. Why this improves crop resistance
+
+With the original design, a crop could remove unique watermark bits because each bit existed only once.
+
+With the updated design, every watermark bit exists in six spatially separated regions. A crop may remove or damage some copies, but retrieval can combine the surviving copies.
+
+This improves the probability of recovering the watermark when enough image content remains.
+
+### 7. Trade-off
+
+Embedding six complete copies modifies more DCT blocks than embedding one copy.
+
+This may:
+
+- reduce the PSNR of the watermarked image;
+- increase visible distortion when the strength is too high;
+- increase embedding and retrieval time.
+
+The embedding strength should therefore be tested carefully. Suggested values are:
+
+```matlab
+strength = 40;
+strength = 60;
+strength = 80;
+strength = 100;
+```
+
+Use the lowest value that provides acceptable watermark recovery.
+
+### 8. Limitation
+
+Regional repetition reduces information loss caused by cropping, but it does not automatically determine an unknown crop location, crop ratio, rotation, or scale.
+
+The current retrieval implementation contains special registration for the project's known attack:
+
+```text
+center 80% crop
++
+nearest-neighbour resize back to the original dimensions
+```
+
+A completely arbitrary crop requires more advanced synchronization or image-registration methods.
+
