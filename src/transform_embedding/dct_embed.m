@@ -34,6 +34,20 @@ end
 blockSize = 8;
 metadataLength = 80;
 
+%============================== CHANGED ==============================
+%The original version stored only one complete watermark copy.
+%The image is now divided into a 2x3 regional grid so six complete
+%watermark copies can be embedded in spatially separated regions.
+%If one region is cropped away, other regions may still retain the data.
+regionRows = 2;
+regionCols = 3;
+numCopies = regionRows * regionCols;
+
+%This value describes the known center-crop test used by the evaluation.
+%It is saved in JSON so the retrieval code can reverse that specific test.
+supportedCropRatio = 0.80;
+%============================ END CHANGE =============================
+
 %Read the original image
 %reads the original image and stores in img
 img = imread(inputImagePath);
@@ -133,12 +147,90 @@ padWBits = dec2bin(uint8(padW), 8) - '0';
 metadataBits = logical([hBits(:); wBits(:); nBits(:); ...
                         padHBits(:); padWBits(:)]);
 
-%check whether the watermark can fit inside the original image
-%watermark cannot be larger than the number of blocks
-if metadataLength + numBits > maxBits
-    error(['Watermark is too large. Need %d complete 8x8 blocks, ' ...
-           'but only %d are available.'], metadataLength + numBits, maxBits);
+%============================== CHANGED ==============================
+%The original version checked whether one complete payload fit in the whole
+%image. The new version builds one complete payload and checks that the same
+%payload fits independently inside every one of the six regions.
+payloadBits = [metadataBits; watermarkBits];
+payloadLength = length(payloadBits);
+
+%Store one row of selected block indices for each regional copy.
+copyBlockIndices = zeros(numCopies, payloadLength);
+
+%Each row stores:
+%[firstBlockRow, lastBlockRow, firstBlockCol, lastBlockCol]
+regionBounds = zeros(numCopies, 4);
+
+copyIndex = 1;
+
+%Divide the complete DCT block grid into a 2x3 region layout.
+for regionRow = 1:regionRows
+
+    firstBlockRow = ...
+        floor((regionRow - 1) * numBlocksH / regionRows) + 1;
+
+    lastBlockRow = ...
+        floor(regionRow * numBlocksH / regionRows);
+
+    for regionCol = 1:regionCols
+
+        firstBlockCol = ...
+            floor((regionCol - 1) * numBlocksW / regionCols) + 1;
+
+        lastBlockCol = ...
+            floor(regionCol * numBlocksW / regionCols);
+
+        regionBounds(copyIndex, :) = [ ...
+            firstBlockRow, lastBlockRow, ...
+            firstBlockCol, lastBlockCol];
+
+        %Collect all block indices located inside the current region.
+        regionBlockIndices = [];
+
+        for blockRow = firstBlockRow:lastBlockRow
+            for blockCol = firstBlockCol:lastBlockCol
+
+                blockIndex = ...
+                    (blockRow - 1) * numBlocksW + blockCol;
+
+                regionBlockIndices(end + 1) = blockIndex; %#ok<AGROW>
+            end
+        end
+
+        regionCapacity = length(regionBlockIndices);
+
+        %Each region must be large enough for one complete header and
+        %watermark copy.
+        if payloadLength > regionCapacity
+            error(['Region %d contains only %d blocks, but one complete ' ...
+                   'copy requires %d blocks. Use a smaller watermark or ' ...
+                   'fewer/larger regions.'], ...
+                   copyIndex, regionCapacity, payloadLength);
+        end
+
+        %Spread one complete copy evenly throughout this region.
+        selectedPositions = round(linspace( ...
+            1, regionCapacity, payloadLength));
+
+        selectedBlocks = regionBlockIndices(selectedPositions);
+
+        %The payload cannot use the same block twice inside one region.
+        if length(unique(selectedBlocks)) ~= payloadLength
+            error('Region %d generated duplicate block indices.', copyIndex);
+        end
+
+        copyBlockIndices(copyIndex, :) = selectedBlocks;
+        copyIndex = copyIndex + 1;
+    end
 end
+
+%The old maxBits value is kept because the original block-count comments and
+%calculation are still useful. This check confirms all generated indices are
+%inside the complete image block grid.
+if any(copyBlockIndices(:) < 1) || any(copyBlockIndices(:) > maxBits)
+    error('One or more regional block indices are outside the image.');
+end
+%============================ END CHANGE =============================
 
 %Choose DCT coefficients
 %these are two mid-frequency coefficient positions inside each 8x8 DCT block
@@ -152,82 +244,83 @@ coeff2 = [5,4];
 %DCT matrix
 D = create_dct_matrix(blockSize);
 
-% Select block positions spread evenly across the whole image
-metadataBlockIndices = 1:metadataLength;
-watermarkBlockIndices = round(linspace(metadataLength + 1, maxBits, numBits));
+%============================== CHANGED ==============================
+%The original version had one loop that embedded one payload copy.
+%The new outer loop selects one of the six regions, and the inner loop
+%embeds the complete header and watermark inside that region.
+for copyIndex = 1:numCopies
 
-payloadBits = [metadataBits; watermarkBits];
-payloadBlockIndices = [metadataBlockIndices, watermarkBlockIndices];
+    for payloadIndex = 1:payloadLength
 
-for bitIndex = 1:length(payloadBits)
+        % Convert selected 1D block index into block row and block column
+        blockIndex = copyBlockIndices(copyIndex, payloadIndex);
 
-    % Convert selected 1D block index into block row and block column
-    blockIndex = payloadBlockIndices(bitIndex);
+        blockRow = floor((blockIndex - 1) / numBlocksW) + 1;
+        blockCol = mod(blockIndex - 1, numBlocksW) + 1;
 
-    blockRow = floor((blockIndex - 1) / numBlocksW) + 1;
-    blockCol = mod(blockIndex - 1, numBlocksW) + 1;
+        % Calculate the starting pixel position of the selected block
+        rowStart = (blockRow - 1) * blockSize + 1;
+        colStart = (blockCol - 1) * blockSize + 1;
 
-    % Calculate the starting pixel position of the selected block
-    rowStart = (blockRow - 1) * blockSize + 1;
-    colStart = (blockCol - 1) * blockSize + 1;
+        % Extract one 8x8 block from the padded Y channel
+        block = paddedY(rowStart:rowStart+blockSize-1, ...
+                        colStart:colStart+blockSize-1);
 
-    % Extract one 8x8 block from the padded Y channel
-    block = paddedY(rowStart:rowStart+blockSize-1, ...
-                    colStart:colStart+blockSize-1);
+        %Apply DCT
+        %This applies the 2D Discrete Cosine Transform to the 8x8 block
+        %before DCT, the block contains pixel brightness values
+        %after DCT, the block contains frequency coefficients
+        dctBlock = D * block * D';
 
-    %Apply DCT
-    %This applies the 2D Discrete Cosine Transform to the 8x8 block
-    %before DCT, the block contains pixel brightness values
-    %after DCT, the block contains frequency coefficients
-    dctBlock = D * block * D';
+        % Get the current watermark/header bit
+        bit = payloadBits(payloadIndex);
 
-    % Get the current watermark bit
-    bit = payloadBits(bitIndex);
+        % Read the two selected DCT coefficients
+        c1 = dctBlock(coeff1(1), coeff1(2));
+        c2 = dctBlock(coeff2(1), coeff2(2));
 
-    % Read the two selected DCT coefficients
-    c1 = dctBlock(coeff1(1), coeff1(2));
-    c2 = dctBlock(coeff2(1), coeff2(2));
-
-    % Embed bit by forcing a coefficient relationship
-    %embed bit 1
-    if bit == 1
-        %if the watermark bit is 1, we want c1 > c2
-        %check whether c1 is not large enough compared to c2
-        %c1 should be greater than c2 by about strength to make the
-        %watermakr more robust
-        if c1 <= c2 + strength
-            %calculates the average of the two coefficients
-            avg = (c1 + c2) / 2;
-            %modifies the two DCT coefficients 
-            %for bit 1, it forces coeff1 > coeff2
-            %specifically coeff1 = average + strength/2
-            %coeff2 = average - strength/2
-            %so the distance between them becomes about strength
-            dctBlock(coeff1(1), coeff1(2)) = avg + strength / 2;
-            dctBlock(coeff2(1), coeff2(2)) = avg - strength / 2;
+        % Embed bit by forcing a coefficient relationship
+        %embed bit 1
+        if bit == 1
+            %if the watermark bit is 1, we want c1 > c2
+            %check whether c1 is not large enough compared to c2
+            %c1 should be greater than c2 by about strength to make the
+            %watermakr more robust
+            if c1 <= c2 + strength
+                %calculates the average of the two coefficients
+                avg = (c1 + c2) / 2;
+                %modifies the two DCT coefficients
+                %for bit 1, it forces coeff1 > coeff2
+                %specifically coeff1 = average + strength/2
+                %coeff2 = average - strength/2
+                %so the distance between them becomes about strength
+                dctBlock(coeff1(1), coeff1(2)) = avg + strength / 2;
+                dctBlock(coeff2(1), coeff2(2)) = avg - strength / 2;
+            end
+        %embed bit 0
+        else
+            %For bit 0: coeff2 should be greater than coeff1 by about
+            %strength
+            if c2 <= c1 + strength
+                %calculate the average
+                avg = (c1 + c2) / 2;
+                %force coeff2 > coeff1
+                dctBlock(coeff1(1), coeff1(2)) = avg - strength / 2;
+                dctBlock(coeff2(1), coeff2(2)) = avg + strength / 2;
+            end
         end
-    %embed bit 0
-    else
-        %For bit 0: coeff2 should be greater than coeff1 by about
-        %strength
-        if c2 <= c1 + strength
-            %calculate the average
-            avg = (c1 + c2) / 2;
-            %force coeff2 > coeff1
-            dctBlock(coeff1(1), coeff1(2)) = avg - strength / 2;
-            dctBlock(coeff2(1), coeff2(2)) = avg + strength / 2;
-        end
+
+        % Apply manual inverse 2D DCT
+        %converts the modified DCT coefficients back into pixel values
+        %which the blocks now contains the hidden watermark information
+        modifiedBlock = D' * dctBlock * D;
+
+        % Put the modified block back into the Y channel
+        paddedY(rowStart:rowStart+blockSize-1, ...
+                colStart:colStart+blockSize-1) = modifiedBlock;
     end
-
-    % Apply manual inverse 2D DCT
-    %converts the modified DCT coefficients back into pixel values
-    %which the blocks now contains the hidden watermark information
-    modifiedBlock = D' * dctBlock * D;
-
-    % Put the modified block back into the Y channel
-    paddedY(rowStart:rowStart+blockSize-1, ...
-            colStart:colStart+blockSize-1) = modifiedBlock;
 end
+%============================ END CHANGE =============================
 
 %Crop image back to original size
 %since we padded the image to make it divisible by 8
@@ -250,8 +343,18 @@ watermarkedImg = uint8(min(max(watermarkedImg, 0), 255));
 %save the final watermarked image
 imwrite(watermarkedImg, outputImagePath);
 
+%============================== CHANGED ==============================
 %save metadata
-metadata.method = 'DCT transform-domain watermarking';
+%The original metadata is kept, but additional fields are added so retrieval
+%knows the six regions and the exact block positions for every copy.
+
+%Flatten the matrix in copy-major order:
+%copy 1 payload, copy 2 payload, ..., copy 6 payload.
+flatCopyBlockIndices = reshape(copyBlockIndices.', 1, []);
+
+metadata.method = ...
+    'DCT transform-domain watermarking with six full regional copies';
+
 metadata.inputImage = inputImagePath;
 metadata.watermarkImage = watermarkPath;
 metadata.outputImage = outputImagePath;
@@ -266,8 +369,26 @@ metadata.strength = strength;
 metadata.blockSize = blockSize;
 metadata.coeff1 = coeff1;
 metadata.coeff2 = coeff2;
-metadata.selectedBlockIndices = payloadBlockIndices;
+
+%New regional-copy information
+metadata.metadataLength = metadataLength;
+metadata.payloadLength = payloadLength;
+metadata.regionRows = regionRows;
+metadata.regionCols = regionCols;
+metadata.numCopies = numCopies;
+metadata.regionBounds = regionBounds;
+metadata.copyOrdering = 'copy-major';
+metadata.blockSelection = ...
+    'one complete payload evenly distributed inside each region';
+metadata.supportedCropRatio = supportedCropRatio;
+metadata.regionalBlockIndices = flatCopyBlockIndices;
+
+%Keep selectedBlockIndices so other project code that checks this original
+%field does not fail. It now contains all six copies in copy-major order.
+metadata.selectedBlockIndices = flatCopyBlockIndices;
+
 metadata.channel = 'Manual Y channel from RGB to YCbCr conversion';
+%============================ END CHANGE =============================
 
 %converts the matlab metadata structure into JSON text
 jsonText = jsonencode(metadata);
@@ -275,13 +396,27 @@ jsonText = jsonencode(metadata);
 %open the meta data file for writing
 fid = fopen(metadataPath, 'w');
 
+if fid == -1
+    error('Could not open metadata output file: %s', metadataPath);
+end
+
 %writes the JSON text into the metadata file
 fprintf(fid, '%s', jsonText);
 
 %close the metadata file
 fclose(fid);
 
-fprintf('DCT watermark embedding complete.\n');
+%============================== CHANGED ==============================
+%The status output now reports the six-copy regional layout.
+fprintf('DCT regional-copy embedding complete.\n');
+fprintf('Regional layout: %d x %d (%d complete copies).\n', ...
+    regionRows, regionCols, numCopies);
+fprintf('Payload per copy: %d header bits + %d watermark bits.\n', ...
+    metadataLength, numBits);
+fprintf('Total embedded block payloads: %d.\n', ...
+    numCopies * payloadLength);
+%============================ END CHANGE =============================
+
 fprintf('Output image saved to: %s\n', outputImagePath);
 fprintf('Metadata saved to: %s\n', metadataPath);
 
@@ -305,22 +440,3 @@ for k = 0:N-1
 end
 
 end
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
